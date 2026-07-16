@@ -158,6 +158,63 @@ function get_snmp {
         fi
 }
 
+############################################################
+# Nagios range threshold check
+# Returns: 0 = alert, 1 = ok, 2 = invalid threshold/value
+############################################################
+function threshold_is_alert {
+        value="$1"
+        threshold="$2"
+
+        if [ -z "$threshold" ]
+        then
+                return 1
+        fi
+
+        awk -v v="$value" -v t="$threshold" '
+        function isnum(x) { return (x ~ /^-?[0-9]+([.][0-9]+)?$/) }
+        BEGIN {
+                invert=0
+                if (substr(t,1,1) == "@") {
+                        invert=1
+                        t=substr(t,2)
+                }
+
+                parts=split(t, a, ":")
+                if (parts == 1) {
+                        start=0
+                        end=a[1]
+                } else {
+                        start=a[1]
+                        end=a[2]
+                }
+
+                if (start == "") start=0
+                if (start == "~") start="-inf"
+                if (end == "") end="+inf"
+
+                if (!isnum(v)) exit 2
+                if (start != "-inf" && !isnum(start)) exit 2
+                if (end != "+inf" && !isnum(end)) exit 2
+
+                ge_start=(start == "-inf") ? 1 : (v >= start)
+                le_end=(end == "+inf") ? 1 : (v <= end)
+                inside=(ge_start && le_end)
+
+                if (invert) {
+                        alert=inside
+                } else {
+                        alert=!inside
+                }
+
+                if (alert) exit 0
+                exit 1
+        }'
+
+        rc=$?
+        return $rc
+}
+
 #################################################################################
 # Display Help screen
 #################################################################################
@@ -230,13 +287,28 @@ msmuptime)
         uptime_human=$(echo $uptime | awk '{print $5}')
         debug_out "uptime: $uptime_human (${uptime_min} min)"
         perf="uptime=${uptime_min}min;$warning;$critical;0;"
-        if [ $uptime_min -ge $critical ]
+        threshold_is_alert "$uptime_min" "$critical"
+        crit_state=$?
+        if [ $crit_state -eq 2 ]
         then
-                echo "CRITICAL: Uptime ${uptime_min} min ($uptime_human) is higher than $critical min |$perf"
+                echo "UNKNOWN: invalid critical threshold '$critical' |$perf"
+                exit $STATE_UNKNOWN
+        elif [ $crit_state -eq 0 ]
+        then
+                echo "CRITICAL: Uptime ${uptime_min} min ($uptime_human) violates critical threshold $critical |$perf"
                 exit $STATE_CRITICAL
-        elif [ $uptime_min -ge $warning ]
+
+        fi
+
+        threshold_is_alert "$uptime_min" "$warning"
+        warn_state=$?
+        if [ $warn_state -eq 2 ]
         then
-                echo "WARNING: Uptime ${uptime_min} min ($uptime_human) is higher than $warning min |$perf"
+                echo "UNKNOWN: invalid warning threshold '$warning' |$perf"
+                exit $STATE_UNKNOWN
+        elif [ $warn_state -eq 0 ]
+        then
+                echo "WARNING: Uptime ${uptime_min} min ($uptime_human) violates warning threshold $warning |$perf"
                 exit $STATE_WARNING
         else
                 echo "OK: Uptime is ${uptime_min} min ($uptime_human) |$perf"
@@ -414,18 +486,18 @@ debug_out "Controller has $ap_cnt APs"
                 perf="apoffline=$offline;$warning;$critical;0;$ap_cnt aponline=$aponline;;;0;$ap_cnt aptotal=$ap_cnt;;;0;"
                 if [ $offline -ge $critical ]
                 then
-                        echo -e "CRITICAL: $offline out of $ap_cnt accesspoints is/are offline |$perf"
+                        echo -e "STATUS: $offline out of $ap_cnt accespoint are offline |$perf"
                         exit $STATE_CRITICAL
                 elif [ $offline -ge $warning ]
                 then
-                        echo -e "WARNING: $offline out of $ap_cnt accesspoints is/are offline |$perf"
+                        echo -e "STATUS: $offline out of $ap_cnt accespoint are offline |$perf"
                         exit $STATE_WARNING
                 elif [ $unknown -ge 1 ]
                 then
-                        echo -e "UNKNOWN: $unknown accesspoints are in unknown state |$perf"
+                        echo -e "STATUS: $offline out of $ap_cnt accespoint are offline |$perf"
                         exit $STATE_UNKNOWN
                 else
-                        echo -e "OK: all $ap_cnt accesspoints are online |$perf"
+                        echo -e "STATUS: $offline out of $ap_cnt accespoint are offline |$perf"
                         exit $STATE_OK
                 fi
 
